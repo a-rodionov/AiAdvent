@@ -1,11 +1,15 @@
 import sys
 import os
+import signal
+import asyncio
 import argparse
 from config import load_config, ModelConfig
 from dotenv import load_dotenv
-from anthropic import Anthropic, APIError, AuthenticationError
+from anthropic import AsyncAnthropic, APIError, AuthenticationError
 
-def run(config: ModelConfig, verbose: bool) -> None:
+
+async def run(config: ModelConfig, verbose: bool) -> None:
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     print("Configuration loaded successfully!\n")
 
     if verbose:
@@ -26,7 +30,7 @@ def run(config: ModelConfig, verbose: bool) -> None:
         print("[ERROR] ANTHROPIC_API_KEY environment variable is not set.")
         sys.exit(1)
 
-    client = Anthropic(api_key=api_key)
+    client = AsyncAnthropic(api_key=api_key)
 
     print("Press Ctrl+C or Ctrl+D to exit.\n")
     try:
@@ -40,34 +44,32 @@ def run(config: ModelConfig, verbose: bool) -> None:
             messages.append({"role": "user", "content": user_input})
 
             try:
-                response = client.messages.create(
+                assistant_text = ""
+                print("Model: ", end="", flush=True)
+                async with client.messages.stream(
                     system=system_prompt,
                     max_tokens=config.max_tokens,
                     messages=messages,
                     model=config.model,
                     temperature=config.temperature,
                     top_k=config.top_k
-                )
+                ) as stream:
+                    async for text in stream.text_stream:
+                        print(text, end="", flush=True)
+                        assistant_text += text
+                print()
             except AuthenticationError:
                 messages.pop()
-                print("[ERROR] Authentication failed. Check your ANTHROPIC_API_KEY.")
+                print("\n[ERROR] Authentication failed. Check your ANTHROPIC_API_KEY.")
                 sys.exit(1)
             except APIError as e:
                 messages.pop()
-                print(f"[ERROR] API error: {e.message}")
+                print(f"\n[ERROR] API error: {e.message}")
                 continue
-
-            assistant_text = ""
-            for content in response.content:
-                if "text" == content.type:
-                    print("Model: ", content.text)
-                    assistant_text += content.text
-                else:
-                    print("Model returned unsupported type of content: ", content.type)
 
             messages.append({"role": "assistant", "content": assistant_text})
 
-    except (KeyboardInterrupt, EOFError):
+    except (EOFError, asyncio.CancelledError, KeyboardInterrupt):
         print()
         return
 
@@ -109,7 +111,10 @@ def main():
     # Load and validate config
     config = load_config(args.config)
 
-    run(config, verbose=args.verbose)
+    try:
+        asyncio.run(run(config, verbose=args.verbose))
+    except KeyboardInterrupt:
+        print()
 
 
 if __name__ == "__main__":
