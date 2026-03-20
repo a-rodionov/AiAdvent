@@ -1,8 +1,9 @@
+import sys
 import os
 import argparse
 from config import load_config, ModelConfig
 from dotenv import load_dotenv
-from anthropic import Anthropic
+from anthropic import Anthropic, APIError, AuthenticationError
 
 def run(config: ModelConfig, verbose: bool) -> None:
     print("Configuration loaded successfully!\n")
@@ -20,27 +21,41 @@ def run(config: ModelConfig, verbose: bool) -> None:
         print(f"Temp  : {config.temperature}")
         print("\nTip: use --verbose to see all fields.")
 
-    client = Anthropic(
-        # This is the default and can be omitted
-        api_key=os.environ.get("ANTHROPIC_API_KEY"),
-    )
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("[ERROR] ANTHROPIC_API_KEY environment variable is not set.")
+        sys.exit(1)
+
+    client = Anthropic(api_key=api_key)
 
     print("Press Ctrl+C or Ctrl+D to exit.\n")
-    system_prompt = input("Enter system prompt if needed: ")
-    messages = []
-    while True:
-        try:
+    try:
+        system_prompt = input("Enter system prompt if needed: ")
+        messages = []
+        while True:
             user_input = input("User: ")
+            if not user_input.strip():
+                continue
+
             messages.append({"role": "user", "content": user_input})
 
-            response = client.messages.create(
-                system=system_prompt,
-                max_tokens=config.max_tokens,
-                messages=messages,
-                model=config.model,
-                temperature=config.temperature,
-                top_k=config.top_k
-            )
+            try:
+                response = client.messages.create(
+                    system=system_prompt,
+                    max_tokens=config.max_tokens,
+                    messages=messages,
+                    model=config.model,
+                    temperature=config.temperature,
+                    top_k=config.top_k
+                )
+            except AuthenticationError:
+                messages.pop()
+                print("[ERROR] Authentication failed. Check your ANTHROPIC_API_KEY.")
+                sys.exit(1)
+            except APIError as e:
+                messages.pop()
+                print(f"[ERROR] API error: {e.message}")
+                continue
 
             assistant_text = ""
             for content in response.content:
@@ -52,10 +67,9 @@ def run(config: ModelConfig, verbose: bool) -> None:
 
             messages.append({"role": "assistant", "content": assistant_text})
 
-        except KeyboardInterrupt:
-            break
-        except EOFError:
-            break
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return
 
 
 def main():
