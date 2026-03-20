@@ -27,28 +27,30 @@ def run(config: ModelConfig, verbose: bool) -> None:
 
     print("Press Ctrl+C or Ctrl+D to exit.\n")
     system_prompt = input("Enter system prompt if needed: ")
+    messages = []
     while True:
         try:
             user_input = input("User: ")
+            messages.append({"role": "user", "content": user_input})
 
-            message = client.messages.create(
-                system = system_prompt,
+            response = client.messages.create(
+                system=system_prompt,
                 max_tokens=config.max_tokens,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": user_input,
-                    }
-                ],
+                messages=messages,
                 model=config.model,
                 temperature=config.temperature,
                 top_k=config.top_k
             )
-            for content in message.content:
+
+            assistant_text = ""
+            for content in response.content:
                 if "text" == content.type:
                     print("Model: ", content.text)
+                    assistant_text += content.text
                 else:
                     print("Model returned unsupported type of content: ", content.type)
+
+            messages.append({"role": "assistant", "content": assistant_text})
 
         except KeyboardInterrupt:
             break
