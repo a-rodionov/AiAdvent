@@ -1,4 +1,6 @@
+import os
 import json
+from pathlib import Path
 from dataclasses import dataclass, fields
 from typing import Optional, List
 
@@ -45,7 +47,7 @@ def _validate_top_p(value: float) -> float:
         raise ValueError(f"top_p must be between 0 and 1, got {value}")
     return value
 
-def parse_model_config(json_input: str | dict) -> ModelConfig:
+def parse_model_config(json_input: str | dict, path: str) -> ModelConfig:
     """Parse a JSON string or dict into a ModelConfig object."""
 
     # Accept both raw JSON string and already-parsed dict
@@ -61,17 +63,30 @@ def parse_model_config(json_input: str | dict) -> ModelConfig:
     missing = [f for f in required if f not in data]
     if missing:
         raise ValueError(f"Missing required fields: {missing}")
+    
+    system_prompt = None
+    if "system_prompt" in data:
+        system_prompt = load_system_prompt(str(Path(path) / data["system_prompt"]))
 
     return ModelConfig(
         model=str(data["model"]),
         max_tokens=_validate_max_tokens(int(data["max_tokens"])),
-        system_prompt=str(data["system_prompt"]) if "system_prompt" in data else None,
+        system_prompt=system_prompt,
         temperature=_validate_temperature(float(data["temperature"])) if "temperature" in data else None,
         top_k=_validate_top_k(int(data["top_k"])) if "top_k" in data else None,
         top_p=_validate_top_p(float(data["top_p"])) if "top_p" in data else None,
         stop_sequences=[str(s) for s in data["stop_sequences"]] if "stop_sequences" in data else None,
         output_config=OutputConfig(data["output_config"]["json_schema"]) if "output_config" in data else None,
     )
+
+def load_system_prompt(path: str) -> str:
+    try:
+        with open(path, "r") as f:
+            return f.read()
+    except FileNotFoundError:
+        raise SystemExit(f"[ERROR] System prompt file not found: '{prompt_path}'")
+    except PermissionError:
+        raise SystemExit(f"[ERROR] Permission denied when reading: '{prompt_path}'")
 
 def load_config(path: str) -> ModelConfig:
     try:
@@ -85,6 +100,6 @@ def load_config(path: str) -> ModelConfig:
         raise SystemExit(f"[ERROR] Invalid JSON in '{path}': {e}")
 
     try:
-        return parse_model_config(data)
+        return parse_model_config(data, os.path.dirname(path))
     except ValueError as e:
         raise SystemExit(f"[ERROR] Configuration error in '{path}': {e}")
