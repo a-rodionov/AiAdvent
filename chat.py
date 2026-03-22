@@ -3,8 +3,11 @@ import os
 import signal
 import asyncio
 import argparse
+import time
 from enum import Enum
-from config import load_config, ModelConfig
+from chat_config import ChatConfig, ChatConfigFileAdapter
+from conversation_config import ConversationConfig, ConversationConfigFileAdapter, format_conversation_config
+from model_pricing import ModelPricingFileAdapter, format_pricing_report
 from dotenv import load_dotenv
 from anthropic import AsyncAnthropic, APIError, AuthenticationError, transform_schema
 
@@ -28,11 +31,12 @@ STOP_REASON_DESCRIPTIONS = {
 }
 
 
-async def run(config: ModelConfig, verbose: bool) -> None:
+async def run(conversation_config: ConversationConfig, model_pricing: ModelPricing, verbose: bool) -> None:
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
     if verbose:
-        config.print_config()
+        print(f"\033[94m{format_conversation_config(conversation_config)}\033[0m")
+        
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -43,6 +47,8 @@ async def run(config: ModelConfig, verbose: bool) -> None:
 
     try:
         messages = []
+        input_tokens = 0
+        output_tokens = 0
         while True:
             user_input = input("User: ")
             if not user_input.strip():
@@ -54,36 +60,41 @@ async def run(config: ModelConfig, verbose: bool) -> None:
                 assistant_text = ""
                 print("Model: ", end="", flush=True)
                 kwargs = {
-                    "max_tokens": config.max_tokens,
+                    "max_tokens": conversation_config.max_tokens,
                     "messages": messages,
-                    "model": config.model,
+                    "model": conversation_config.model,
                 }
-                if config.system_prompt:
-                    kwargs["system"] = config.system_prompt
-                if config.temperature is not None:
-                    kwargs["temperature"] = config.temperature
-                if config.top_k is not None:
-                    kwargs["top_k"] = config.top_k
-                if config.temperature is None and config.top_p is not None:
-                    kwargs["top_p"] = config.top_p
-                if config.stop_sequences is not None:
-                    kwargs["stop_sequences"] = config.stop_sequences
-                if config.output_config is not None:
-                    kwargs["output_config"] = {"format": {"type": "json_schema", "schema": transform_schema(config.output_config.json_schema)}}
+                if conversation_config.system_prompt:
+                    kwargs["system"] = conversation_config.system_prompt
+                if conversation_config.temperature is not None:
+                    kwargs["temperature"] = conversation_config.temperature
+                if conversation_config.top_k is not None:
+                    kwargs["top_k"] = conversation_config.top_k
+                if conversation_config.temperature is None and conversation_config.top_p is not None:
+                    kwargs["top_p"] = conversation_config.top_p
+                if conversation_config.stop_sequences is not None:
+                    kwargs["stop_sequences"] = conversation_config.stop_sequences
+                if conversation_config.output_config is not None:
+                    kwargs["output_config"] = {"format": {"type": "json_schema", "schema": transform_schema(conversation_config.output_config.json_schema)}}
 
+                start_time = time.monotonic()
                 async with client.messages.stream(**kwargs) as stream:
                     async for text in stream.text_stream:
                         print(text, end="", flush=True)
                         assistant_text += text
-
                 print()
 
-                message = await stream.get_final_message()                                                                                                           
-                stop_reason = message.stop_reason                                                                                                             
-                description = STOP_REASON_DESCRIPTIONS.get(StopReason(stop_reason), "Unknown stop reason.")                                                   
-                print(f"\033[94m[StopReason: {stop_reason}] {description}\033[0m")
-                if message.stop_sequence:
-                    print(f"\033[94mStop sequence: {message.stop_sequence}\033[0m")
+                message = await stream.get_final_message()
+                if verbose:
+                    elapsed_ms = (time.monotonic() - start_time) * 1000
+                    model_pricing.estimate(base_input_tokens = message.usage.input_tokens, output_tokens = message.usage.output_tokens)
+                    stop_reason = message.stop_reason
+                    description = STOP_REASON_DESCRIPTIONS.get(StopReason(stop_reason), "Unknown stop reason.")
+                    print(f"\033[94m[StopReason: {stop_reason}] {description}\033[0m")
+                    if message.stop_sequence:
+                        print(f"\033[94mStop sequence: {message.stop_sequence}\033[0m")
+                    print(f"\033[94m[Response elapsed time: {elapsed_ms:.0f} ms]\033[0m")
+                    print(f"\033[94m{format_pricing_report(model_pricing.get_report())}\033[0m")
                 
             except AuthenticationError:
                 messages.pop()
@@ -107,15 +118,15 @@ def main():
         description="Chat with LLM.",
         epilog=(
             "Examples:\n"
-            "  python chat.py config.json\n"
-            "  python chat.py config.json --verbose\n"
+            "  python chat.py chat_config.json\n"
+            "  python chat.py chat_config.json --verbose\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
     parser.add_argument(
-        "config",
-        metavar="CONFIG_FILE",
+        "chat_config",
+        metavar="CHAT_CONFIG_FILE",
         help="Path to the JSON configuration file (required)"
     )
 
@@ -135,11 +146,15 @@ def main():
 
     load_dotenv()
 
-    # Load and validate config
-    config = load_config(args.config)
+    chat_config_file_adapter = ChatConfigFileAdapter(args.chat_config)
+    chat_config = chat_config_file_adapter.create_chat_config()
+    conversation_config_file_adapter = ConversationConfigFileAdapter(chat_config.default_conversation_config_path)
+    conversation_config = conversation_config_file_adapter.create_conversation_config()
+    model_pricing_file_adapter = ModelPricingFileAdapter(chat_config.models_pricing_path)
+    model_pricing = model_pricing_file_adapter.create_model_pricing(conversation_config.model)
 
     try:
-        asyncio.run(run(config, verbose=args.verbose))
+        asyncio.run(run(conversation_config, model_pricing, verbose=args.verbose))
     except KeyboardInterrupt:
         print()
 

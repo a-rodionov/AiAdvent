@@ -1,0 +1,4 @@
+{
+  "default_conversation_config_path": "conversation_configs/sonnet_4_6_std.json",
+  "models_pricing_path": "models_service_data/models_pricing.json"
+}

@@ -1,0 +1,52 @@
+{
+  "models_pricing": [
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "tokens_per_price": 1000000,
+      "base_input_tokens": 1.0,
+      "output_tokens": 5.0
+    },
+    {
+      "model": "claude-sonnet-4-20250514",
+      "tokens_per_price": 1000000,
+      "base_input_tokens": 3.0,
+      "output_tokens": 15.0
+    },
+    {
+      "model": "claude-sonnet-4-5-20250929",
+      "tokens_per_price": 1000000,
+      "base_input_tokens": 3.0,
+      "output_tokens": 15.0
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "tokens_per_price": 1000000,
+      "base_input_tokens": 3.0,
+      "output_tokens": 15.0
+    },
+    {
+      "model": "claude-opus-4-20250514",
+      "tokens_per_price": 1000000,
+      "base_input_tokens": 15.0,
+      "output_tokens": 75.0
+    },
+    {
+      "model": "claude-opus-4-1-20250805",
+      "tokens_per_price": 1000000,
+      "base_input_tokens": 15.0,
+      "output_tokens": 75.0
+    },
+    {
+      "model": "claude-opus-4-5-20251101",
+      "tokens_per_price": 1000000,
+      "base_input_tokens": 5.0,
+      "output_tokens": 25.0
+    },
+    {
+      "model": "claude-opus-4-6",
+      "tokens_per_price": 1000000,
+      "base_input_tokens": 5.0,
+      "output_tokens": 25.0
+    }
+  ]
+}
