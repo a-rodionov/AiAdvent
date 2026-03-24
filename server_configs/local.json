@@ -1,0 +1,7 @@
+{
+  "log_level": "info",
+  "host": "127.0.0.1",
+  "port": 8000,
+  "default_conversation_config_path": "conversation_configs/haiku_4_5_std.json",
+  "models_pricing_path": "models_service_data/models_pricing.json"
+}
