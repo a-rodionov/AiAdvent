@@ -213,7 +213,7 @@ class ChatApp(App):
         list_view = self.query_one("#session-list", ListView)
         await list_view.clear()
         for s in sessions:
-            await list_view.append(SessionItem(s["session_id"]))
+            await list_view.append(SessionItem(s))
 
     async def _create_session(self) -> None:
         session_id = str(uuid.uuid4())

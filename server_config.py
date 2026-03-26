@@ -1,5 +1,6 @@
 from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator, ValidationError
+from pathlib import Path
 
 class ServerConfig(BaseModel):
     log_level: Literal["debug", "info", "warning", "error", "critical"] = Field(default="info")    
@@ -7,6 +8,7 @@ class ServerConfig(BaseModel):
     port:int = Field(ge=1)
     default_conversation_config_path: str = Field(min_length=1)
     models_pricing_path: str = Field(min_length=1)
+    session_storage_dir: str = Field(min_length=1)
 
 def format_server_config(server_config: ServerConfig) -> str:
     formatted_output = ""
@@ -18,8 +20,6 @@ def format_server_config(server_config: ServerConfig) -> str:
 
 class ServerConfigFileAdapter:
     def __init__(self, file_path: str):
-        from pathlib import Path
-
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"Server config file not found: {file_path}")
@@ -29,7 +29,6 @@ class ServerConfigFileAdapter:
     def create_server_config(self) -> ServerConfig:
         import os
         import json
-        from pathlib import Path
         try:
             with open(self.path, "r") as f:
                 data = json.load(f)

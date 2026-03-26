@@ -4,7 +4,7 @@ import os
 import sys
 import time
 import argparse
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -22,6 +22,7 @@ from ws_protocol import (
     SendMessageFrame, CancelFrame, PingFrame,
     ChunkFrame, DoneFrame, ErrorFrame, PongFrame,
 )
+from session_adapter import SessionDto, SessionFileAdapter
 
 logger = logging.getLogger("server")
 
@@ -33,6 +34,7 @@ _sessions: dict[str, "Session"] = {}
 _conversation_config: Optional[ConversationConfig] = None
 _model_pricing_file_adapter: Optional[ModelPricingFileAdapter] = None
 _anthropic_client: Optional[AsyncAnthropic] = None
+_session_file_adapter: Optional[SessionFileAdapter] = None
 
 _client_frame_adapter: TypeAdapter = TypeAdapter(ClientFrame)
 
@@ -41,9 +43,7 @@ _client_frame_adapter: TypeAdapter = TypeAdapter(ClientFrame)
 
 @dataclass
 class Session:
-    id: str
-    created_at: datetime
-    messages: list = field(default_factory=list)
+    dto: SessionDto
     model_pricing: Optional[ModelPricing] = None
     ws: Optional[WebSocket] = None
     stream_task: Optional[asyncio.Task] = None
@@ -112,7 +112,7 @@ def _log_turn(session: Session, message, start_time: float) -> None:
         )
         logger.info(
             "Session %s: stop=%s elapsed=%.0fs\n%s",
-            session.id,
+            session.dto.id,
             message.stop_reason,
             elapsed_s,
             format_pricing_report(session.model_pricing.get_report()),
@@ -120,7 +120,7 @@ def _log_turn(session: Session, message, start_time: float) -> None:
     else:
         logger.info(
             "Session %s: stop=%s elapsed=%.0fs input tokens=%d output tokens=%d",
-            session.id,
+            session.dto.id,
             message.stop_reason,
             elapsed_s,
             message.usage.input_tokens,
@@ -138,15 +138,22 @@ async def create_session(body: CreateSessionRequest) -> SessionSummary:
     if _model_pricing_file_adapter is not None and _conversation_config is not None:
         model_pricing = _model_pricing_file_adapter.create_model_pricing(_conversation_config.model)
     session = Session(
-        id=body.session_id,
-        created_at=datetime.now(tz=timezone.utc),
+        dto=SessionDto(id=body.session_id, created_at=datetime.now(tz=timezone.utc)),
         model_pricing=model_pricing,
     )
+    try:
+        _session_file_adapter.create_session(session.dto)
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail="Session already exists on disk")
+    except PermissionError as e:
+        raise HTTPException(status_code=500, detail=f"Permission denied when saving session: {e}")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save session: {e}")
     _sessions[body.session_id] = session
     logger.info("Session created: %s", body.session_id)
     return SessionSummary(
-        session_id=session.id,
-        created_at=session.created_at,
+        session_id=session.dto.id,
+        created_at=session.dto.created_at,
         message_count=0,
     )
 
@@ -154,47 +161,68 @@ async def create_session(body: CreateSessionRequest) -> SessionSummary:
 @app.delete("/session/{session_id}", status_code=204)
 async def delete_session(session_id: str) -> None:
     session = _sessions.pop(session_id, None)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    if session.ws is not None:
+    if session is not None and session.ws is not None:
         try:
             await session.ws.close(code=1001, reason="Session deleted")
         except Exception:
             pass
+
+    try:
+        _session_file_adapter.delete_session(session_id)
+    except PermissionError as e:
+        logger.error("Permission error deleting session %s: %s", session_id, e)
+        raise HTTPException(status_code=500, detail="Could not delete session data")
+    except FileNotFoundError:
+        pass
+
     logger.info("Session deleted: %s", session_id)
 
 
-@app.get("/sessions", response_model=list[SessionSummary])
-async def list_sessions() -> list[SessionSummary]:
-    return [
-        SessionSummary(
-            session_id=s.id,
-            created_at=s.created_at,
-            message_count=len(s.messages),
-        )
-        for s in _sessions.values()
-    ]
+@app.get("/sessions", response_model=list[str])
+async def list_sessions() -> list[str]:
+    return _session_file_adapter.get_session_ids()
 
 
 @app.get("/session/{session_id}", response_model=SessionDetail)
 async def get_session(session_id: str) -> SessionDetail:
     session = _sessions.get(session_id)
-    if session is None:
+    if session is not None:
+        return SessionDetail(
+            session_id=session.dto.id,
+            created_at=session.dto.created_at,
+            message_count=len(session.dto.messages),
+            messages=[MessageRecord(**m) for m in session.dto.messages],
+        )
+
+    try:
+        session_dto = _session_file_adapter.get_session(session_id)
+        model_pricing = None
+        if _model_pricing_file_adapter is not None and _conversation_config is not None:
+            model_pricing = _model_pricing_file_adapter.create_model_pricing(_conversation_config.model)
+        session = Session(dto=session_dto, model_pricing=model_pricing)
+        _sessions[session_id] = session
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
+    except PermissionError as e:
+        logger.error("Permission error reading session %s: %s", session_id, e)
+        raise HTTPException(status_code=500, detail="Could not read session data")
+    except ValueError as e:
+        logger.error("Corrupt session data for %s: %s", session_id, e)
+        raise HTTPException(status_code=500, detail="Session data is corrupt")
     return SessionDetail(
-        session_id=session.id,
-        created_at=session.created_at,
-        message_count=len(session.messages),
-        messages=[MessageRecord(**m) for m in session.messages],
+        session_id=session_dto.id,
+        created_at=session_dto.created_at,
+        message_count=len(session_dto.messages),
+        messages=[MessageRecord(**m) for m in session_dto.messages],
     )
 
 
 # ── WebSocket streaming ───────────────────────────────────────────────────────
 
 async def _stream_response(session: Session, ws: WebSocket, content: str) -> None:
-    session.messages.append({"role": "user", "content": content})
+    session.dto.messages.append({"role": "user", "content": content})
     session.stream_committed = False
-    kwargs = _build_kwargs(_conversation_config, session.messages)
+    kwargs = _build_kwargs(_conversation_config, session.dto.messages)
 
     try:
         assistant_text = ""
@@ -205,8 +233,15 @@ async def _stream_response(session: Session, ws: WebSocket, content: str) -> Non
                 await ws.send_text(ChunkFrame(delta=text).model_dump_json())
             message = await stream.get_final_message()
 
-        session.messages.append({"role": "assistant", "content": assistant_text})
+        session.dto.messages.append({"role": "assistant", "content": assistant_text})
         session.stream_committed = True
+
+        try:
+            _session_file_adapter.update_session(session.dto)
+        except PermissionError as e:
+            logger.error("Permission denied persisting session %s: %s", session.dto.id, e)
+        except OSError as e:
+            logger.error("Failed to persist session %s: %s", session.dto.id, e)
 
         await ws.send_text(
             DoneFrame(
@@ -220,11 +255,11 @@ async def _stream_response(session: Session, ws: WebSocket, content: str) -> Non
 
     except asyncio.CancelledError:
         if not session.stream_committed:
-            session.messages.pop()
+            session.dto.messages.pop()
         raise
 
     except AuthenticationError:
-        session.messages.pop()
+        session.dto.messages.pop()
         try:
             await ws.send_text(
                 ErrorFrame(
@@ -236,7 +271,7 @@ async def _stream_response(session: Session, ws: WebSocket, content: str) -> Non
             pass
 
     except APIError as e:
-        session.messages.pop()
+        session.dto.messages.pop()
         try:
             await ws.send_text(
                 ErrorFrame(code="api_error", message=str(e.message)).model_dump_json()
@@ -286,9 +321,23 @@ async def _ws_loop(session: Session, ws: WebSocket) -> None:
 async def session_ws(websocket: WebSocket, session_id: str) -> None:
     session = _sessions.get(session_id)
     if session is None:
-        await websocket.accept()
-        await websocket.close(code=4404, reason="Session not found")
-        return
+        try:
+            session_dto = _session_file_adapter.get_session(session_id)
+            model_pricing = None
+            if _model_pricing_file_adapter is not None and _conversation_config is not None:
+                model_pricing = _model_pricing_file_adapter.create_model_pricing(_conversation_config.model)
+            session = Session(dto=session_dto, model_pricing=model_pricing)
+            _sessions[session_id] = session
+        except FileNotFoundError as e:
+            logger.error("Session %s does not exist: %s", session_id, e)
+            await websocket.accept()
+            await websocket.close(code=4404, reason="Session not found")
+            return
+        except (PermissionError, OSError, ValueError) as e:
+            logger.error("Failed to load session %s from disk: %s", session_id, e)
+            await websocket.accept()
+            await websocket.close(code=4500, reason="Failed to load session")
+            return
 
     if session.ws is not None:
         await websocket.accept()
@@ -319,7 +368,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global _conversation_config, _model_pricing_file_adapter, _anthropic_client
+    from pathlib import Path
+    global _conversation_config, _model_pricing_file_adapter, _anthropic_client, _session_file_adapter
 
     parser = argparse.ArgumentParser(
         prog="server",
@@ -341,10 +391,12 @@ def main() -> None:
         logger.critical("ANTHROPIC_API_KEY environment variable is not set.")
         sys.exit(1)
 
+    Path(server_config.session_storage_dir).mkdir(parents=True, exist_ok=True)
     _conversation_config = ConversationConfigFileAdapter(
         server_config.default_conversation_config_path
     ).create_conversation_config()
     _model_pricing_file_adapter = ModelPricingFileAdapter(server_config.models_pricing_path)
+    _session_file_adapter = SessionFileAdapter(server_config.session_storage_dir)
     _anthropic_client = AsyncAnthropic(api_key=api_key)
 
     logger.info(format_server_config(server_config))
