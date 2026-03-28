@@ -1,18 +1,19 @@
 from datetime import datetime
 from pathlib import Path
-from pydantic import BaseModel, Field, field_validator, model_validator, ValidationError
+from typing import Optional
+from pydantic import BaseModel, Field, ValidationError
+from completion_config import CompletionConfig
+from session import SessionDto, SessionStatistics
 
 SESSION_INFO = "session_info"
 SESSION_MESSAGES = "session_messages"
 
-class SessionDto(BaseModel):
-    id: str = Field(min_length=1)
-    created_at: datetime
-    messages: list = Field(default_factory=list)
 
 class SessionInfoDto(BaseModel):
     id: str = Field(min_length=1)
     created_at: datetime
+    completion_config: CompletionConfig
+    statistics: Optional[dict[str, SessionStatistics]] = None
 
 class SessionMessagesDto(BaseModel):
     messages: list = Field(default_factory=list)
@@ -22,15 +23,15 @@ class SessionFileAdapter:
         path = Path(dir_path)
         if not path.exists():
             raise FileNotFoundError(f"Directory for sessions not found: {path}") 
-        self.path: str = path
+        self._path: str = path
 
     def get_session_ids(self) -> list[str]:
-        return [entry.name for entry in self.path.iterdir() if entry.is_dir()]
+        return [entry.name for entry in self._path.iterdir() if entry.is_dir()]
 
     def get_session(self, id: str) -> SessionDto:
         import json
-        info_path = self.path / id / SESSION_INFO
-        msgs_path = self.path / id / SESSION_MESSAGES
+        info_path = self._path / id / SESSION_INFO
+        msgs_path = self._path / id / SESSION_MESSAGES
         try:
             with open(info_path, "r") as f:
                 info = SessionInfoDto.model_validate(json.load(f))
@@ -51,17 +52,27 @@ class SessionFileAdapter:
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON in session info file: {msgs_path}") from e
 
-        return SessionDto(id=info.id, created_at=info.created_at, messages=msgs.messages)
+        return SessionDto(
+            id=info.id,
+            created_at=info.created_at,
+            completion_config=info.completion_config,
+            statistics=info.statistics,
+            messages=msgs.messages)
     
     def create_session(self, session: SessionDto) -> None:
         import json
-        session_dir = self.path / session.id
+        session_dir = self._path / session.id
         try:
             session_dir.mkdir(exist_ok=False)
         except FileExistsError as e:
             raise FileExistsError(f"Session directory already exists: {session_dir}") from e
 
-        info = SessionInfoDto(id=session.id, created_at=session.created_at)
+        info = SessionInfoDto(
+            id=session.id,
+            created_at=session.created_at,
+            completion_config=session.completion_config,
+            statistics=session.statistics,
+        )
         msgs = SessionMessagesDto(messages=session.messages)
 
         try:
@@ -76,11 +87,16 @@ class SessionFileAdapter:
 
     def update_session(self, session: SessionDto) -> None:
         import json
-        session_dir = self.path / session.id
+        session_dir = self._path / session.id
         if not session_dir.exists():
             raise FileNotFoundError(f"Session directory not found: {session_dir}")
 
-        info = SessionInfoDto(id=session.id, created_at=session.created_at)
+        info = SessionInfoDto(
+            id=session.id,
+            created_at=session.created_at,
+            completion_config=session.completion_config,
+            statistics=session.statistics,
+        )
         msgs = SessionMessagesDto(messages=session.messages)
 
         try:
@@ -95,7 +111,7 @@ class SessionFileAdapter:
 
     def delete_session(self, id: str) -> None:
         import shutil
-        session_dir = self.path / id
+        session_dir = self._path / id
         try:
             shutil.rmtree(session_dir)
         except FileNotFoundError as e:

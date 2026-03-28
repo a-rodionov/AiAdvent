@@ -31,12 +31,10 @@ class StreamChunk(Message):
 
 
 class StreamDone(Message):
-    def __init__(self, session_id: str, stop_reason: str, input_tokens: int, output_tokens: int) -> None:
+    def __init__(self, session_id: str, frame: DoneFrame) -> None:
         super().__init__()
         self.session_id = session_id
-        self.stop_reason = stop_reason
-        self.input_tokens = input_tokens
-        self.output_tokens = output_tokens
+        self.frame = frame
 
 
 class StreamError(Message):
@@ -306,12 +304,7 @@ class ChatApp(App):
                     if isinstance(frame, ChunkFrame):
                         self.post_message(StreamChunk(session_id, frame.delta))
                     elif isinstance(frame, DoneFrame):
-                        self.post_message(StreamDone(
-                            session_id,
-                            frame.stop_reason,
-                            frame.input_tokens,
-                            frame.output_tokens,
-                        ))
+                        self.post_message(StreamDone(session_id, frame))
                     elif isinstance(frame, ErrorFrame):
                         self.post_message(StreamError(session_id, frame.code, frame.message))
         except websockets.exceptions.ConnectionClosedError as e:

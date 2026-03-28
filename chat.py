@@ -3,112 +3,103 @@ import os
 import signal
 import asyncio
 import argparse
-import time
-from enum import Enum
-from chat_config import ChatConfig, ChatConfigFileAdapter
-from conversation_config import ConversationConfig, ConversationConfigFileAdapter, format_conversation_config
-from model_pricing import ModelPricingFileAdapter, format_pricing_report
+import logging
+import uuid
+from chat_config import get_chat_config
+from completion_config import CompletionConfigFileAdapter, format_completion_config
+from model_pricing import ModelPricing
+from model_pricing_adapter import ModelPricingFileAdapter
 from dotenv import load_dotenv
-from anthropic import AsyncAnthropic, APIError, AuthenticationError, transform_schema
-
-
-class StopReason(str, Enum):
-    END_TURN = "end_turn"
-    MAX_TOKENS = "max_tokens"
-    STOP_SEQUENCE = "stop_sequence"
-    TOOL_USE = "tool_use"
-    PAUSE_TURN = "pause_turn"
-    REFUSAL = "refusal"
+from any_llm import AnyLLM, AuthenticationError, AnyLLMError
+from llm_adapter import LlmAdapter, StopReason
+from session import Session, SessionTextChunkEvent, SessionCompletionDoneEvent, TokensCost, SessionStatistics
 
 
 STOP_REASON_DESCRIPTIONS = {
-    StopReason.END_TURN: "The model reached a natural stopping point.",
-    StopReason.MAX_TOKENS: "We exceeded the requested max_tokens or the model's maximum.",
-    StopReason.STOP_SEQUENCE: "One of your provided custom stop_sequences was generated.",
-    StopReason.TOOL_USE: "The model invoked one or more tools.",
-    StopReason.PAUSE_TURN: "We paused a long-running turn. You may provide the response back as-is in a subsequent request to let the model continue.",
-    StopReason.REFUSAL: "When streaming classifiers intervene to handle potential policy violations.",
+    StopReason.STOP: "The model reached a natural stopping point.",
+    StopReason.LENGTH: "We exceeded the requested max_tokens or the model's maximum.",
+    StopReason.TOOL_CALLS: "The model invoked one or more tools.",
+    StopReason.CONTENT_FILTER: "When streaming classifiers intervene to handle potential policy violations.",
 }
 
 
-async def run(conversation_config: ConversationConfig, model_pricing: ModelPricing, verbose: bool) -> None:
+class _ColorFormatter(logging.Formatter):
+    _COLORS = {
+        logging.INFO: "\033[94m",
+        logging.ERROR: "\033[91m",
+    }
+    _RESET = "\033[0m"
+
+    def format(self, record: logging.LogRecord) -> str:
+        color = self._COLORS.get(record.levelno, "")
+        message = super().format(record)
+        return f"{color}{message}{self._RESET}" if color else message
+
+
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(_ColorFormatter("%(message)s"))
+
+logger = logging.getLogger(__name__)
+logger.addHandler(_handler)
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+
+def _log_stats(label: str, stats: SessionStatistics) -> None:
+    logger.info(label)
+    for field, value in stats.tokens_usage.model_dump().items():
+        logger.info(f"    {field}: {value}")
+    if stats.tokens_cost is not None:
+        for field, value in stats.tokens_cost.model_dump().items():
+            logger.info(f"    {field} cost: ${value:.8f}")
+
+
+async def run(session: Session) -> None:
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
-    if verbose:
-        print(f"\033[94m{format_conversation_config(conversation_config)}\033[0m")
-        
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("[ERROR] ANTHROPIC_API_KEY environment variable is not set.")
-        sys.exit(1)
-
-    client = AsyncAnthropic(api_key=api_key)
+    logger.info(format_completion_config(session.completion_config))
 
     try:
-        messages = []
-        input_tokens = 0
-        output_tokens = 0
         while True:
             user_input = input("User: ")
             if not user_input.strip():
                 continue
 
-            messages.append({"role": "user", "content": user_input})
-
             try:
-                assistant_text = ""
-                print("Model: ", end="", flush=True)
-                kwargs = {
-                    "max_tokens": conversation_config.max_tokens,
-                    "messages": messages,
-                    "model": conversation_config.model,
-                }
-                if conversation_config.system_prompt:
-                    kwargs["system"] = conversation_config.system_prompt
-                if conversation_config.temperature is not None:
-                    kwargs["temperature"] = conversation_config.temperature
-                if conversation_config.top_k is not None:
-                    kwargs["top_k"] = conversation_config.top_k
-                if conversation_config.temperature is None and conversation_config.top_p is not None:
-                    kwargs["top_p"] = conversation_config.top_p
-                if conversation_config.stop_sequences is not None:
-                    kwargs["stop_sequences"] = conversation_config.stop_sequences
-                if conversation_config.output_config is not None:
-                    kwargs["output_config"] = {"format": {"type": "json_schema", "schema": transform_schema(conversation_config.output_config.json_schema)}}
+                sys.stdout.write("Model: ")
+                sys.stdout.flush()
 
-                start_time = time.monotonic()
-                async with client.messages.stream(**kwargs) as stream:
-                    async for text in stream.text_stream:
-                        print(text, end="", flush=True)
-                        assistant_text += text
-                print()
+                async for event in session.acompletion(user_input, is_stream_prefered=True):
+                    if isinstance(event, SessionTextChunkEvent):
+                        sys.stdout.write(event.text)
+                        sys.stdout.flush()
+                    elif isinstance(event, SessionCompletionDoneEvent):
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                        description = STOP_REASON_DESCRIPTIONS.get(event.stop_reason, "Unknown stop reason.")
+                        logger.info("Response:")
+                        logger.info(f"    StopReason: {event.stop_reason}. {description}")
+                        logger.info(f"    Elapsed time: {event.elapsed_s:.0f}s")
+                        _log_stats("    Tokens usage:", SessionStatistics(
+                            tokens_usage=event.tokens_usage,
+                            tokens_cost=event.tokens_cost,
+                        ))
+                        if session.statistics:
+                            logger.info("Session:")
+                            for key, stats in session.statistics.items():
+                                provider, model = key.split(",", 1)
+                                _log_stats(f"  {provider}/{model}:", stats)
 
-                message = await stream.get_final_message()
-                if verbose:
-                    elapsed_ms = (time.monotonic() - start_time) * 1000
-                    model_pricing.estimate(base_input_tokens = message.usage.input_tokens, output_tokens = message.usage.output_tokens)
-                    stop_reason = message.stop_reason
-                    description = STOP_REASON_DESCRIPTIONS.get(StopReason(stop_reason), "Unknown stop reason.")
-                    print(f"\033[94m[StopReason: {stop_reason}] {description}\033[0m")
-                    if message.stop_sequence:
-                        print(f"\033[94mStop sequence: {message.stop_sequence}\033[0m")
-                    print(f"\033[94m[Response elapsed time: {elapsed_ms:.0f} ms]\033[0m")
-                    print(f"\033[94m{format_pricing_report(model_pricing.get_report())}\033[0m")
-                
             except AuthenticationError:
-                messages.pop()
-                print("\n[ERROR] Authentication failed. Check your ANTHROPIC_API_KEY.")
+                logger.error("Authentication failed. Check your ANTHROPIC_API_KEY.")
                 sys.exit(1)
-            except APIError as e:
-                messages.pop()
-                print(f"\n[ERROR] API error: {e.message}")
+            except AnyLLMError as e:
+                logger.error(f"API error: {e.message}")
                 continue
 
-            messages.append({"role": "assistant", "content": assistant_text})
-
     except (EOFError, asyncio.CancelledError, KeyboardInterrupt):
-        print()
+        sys.stdout.write("\n")
+        sys.stdout.flush()
         return
 
 
@@ -119,7 +110,6 @@ def main():
         epilog=(
             "Examples:\n"
             "  python chat.py chat_config.json\n"
-            "  python chat.py chat_config.json --verbose\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -131,32 +121,35 @@ def main():
     )
 
     parser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Print all configuration fields"
-    )
-
-    parser.add_argument(
         "--version",
         action="version",
         version="%(prog)s 1.0.0"
     )
 
     args = parser.parse_args()
-
     load_dotenv()
+    chat_config = get_chat_config(args.chat_config)
 
-    chat_config_file_adapter = ChatConfigFileAdapter(args.chat_config)
-    chat_config = chat_config_file_adapter.create_chat_config()
-    conversation_config_file_adapter = ConversationConfigFileAdapter(chat_config.default_conversation_config_path)
-    conversation_config = conversation_config_file_adapter.create_conversation_config()
-    model_pricing_file_adapter = ModelPricingFileAdapter(chat_config.models_pricing_path)
-    model_pricing = model_pricing_file_adapter.create_model_pricing(conversation_config.model)
+    logging.basicConfig(
+        level=getattr(logging, chat_config.log_level.upper()),
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+    completion_config = CompletionConfigFileAdapter(chat_config.default_completion_config_path).create_completion_config()
+    model_pricing = ModelPricing.from_dtos(
+        ModelPricingFileAdapter(chat_config.models_pricing_path).get_all_pricing_dtos())
+
+    os.environ.setdefault("ANY_LLM_UNIFIED_EXCEPTIONS", "1")
+    llm = LlmAdapter(completion_config.provider)
+
+    session = Session.create(llm, str(uuid.uuid4()), model_pricing, completion_config)
 
     try:
-        asyncio.run(run(conversation_config, model_pricing, verbose=args.verbose))
+        asyncio.run(run(session))
     except KeyboardInterrupt:
-        print()
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,9 @@
 from __future__ import annotations
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, Optional, Union
 from pydantic import BaseModel, Field
+
+from llm_adapter import StopReason, TokensUsage
+from session import TokensCost
 
 
 # ── Client → Server frames ────────────────────────────────────────────────────
@@ -33,9 +36,12 @@ class ChunkFrame(BaseModel):
 
 class DoneFrame(BaseModel):
     type: Literal["done"] = "done"
-    stop_reason: str
-    input_tokens: int
-    output_tokens: int
+    provider: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    tokens_usage: TokensUsage
+    stop_reason: StopReason
+    elapsed_s: int = Field(ge=0)
+    tokens_cost: Optional[TokensCost] = None
 
 
 class ErrorFrame(BaseModel):

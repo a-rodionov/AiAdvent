@@ -1,0 +1,34 @@
+{
+  "type": "object",
+  "properties": {
+    "items":
+    {
+      "type": "array",
+      "items": {
+          "type": "object",
+          "properties": {
+          "name": {
+              "type": "string",
+              "description": "Имя архитектурного стиля"
+          },
+          "description": {
+              "type": "string",
+              "description": "Краткое описание архитектурного стиля"
+          },
+          "is_distributed": {
+              "type": "boolean",
+              "description": "Является ли архитектурный стиль распределенным?"
+          },
+          "complexity": {
+              "type": "number",
+              "description": "Сложность реализации",
+              "minimum": "1",
+              "maximum": "10"
+          }
+          },
+          "required": ["name", "description", "is_distributed", "compexity"],
+          "additionalProperties": false
+      }
+    }
+  }
+}
