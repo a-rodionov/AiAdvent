@@ -1,0 +1,321 @@
+---
+
+Текущая архитектура — карта зависимостей
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ app/ (monолит) │
+├─────────────────────────────────────────────────────────────────────┤
+│ │
+│ ┌─────────────┐ ┌───────────────────────────────────────────┐ │
+│ │ server.py │───▶│ common/ │ │
+│ │ (uvicorn) │ │ app_factory.py ← composition root │ │
+│ └─────────────┘ │ config_loader.py ← ServerConfig + I/O │ │
+│ │ json_helpers.py ← Pydantic dynamic model│ │
+│ └────────┬──────────────────────────────────┘ │
+│ │ wires │
+│ ┌────────────────────────────▼─────────────────────────────────┐ │
+│ │ adapter/ │ │
+│ │ inbound/web/ │ outbound/llm/ │ │
+│ │ session_routes.py │ llm_adapter.py (any-llm) │ │
+│ │ ws_handler.py │ llm_port_factory_adapter.py │ │
+│ │ ws_protocol.py │ model_billing_factory_adapter.py │ │
+│ │ http_schemas.py │ outbound/persistence/ │ │
+│ │ error_handling.py │ session_file_adapter.py │ │
+│ └────────────────────────┬─────────────────────────────────────┘ │
+│ │ depends on │
+│ ┌─────────────────────────▼────────────────────────────────────┐ │
+│ │ application/ (гексагон) │ │
+│ │ domain/model/ │ port/outbound/ │ │
+│ │ session.py │ llm_port.py (Protocol) │ │
+│ │ completion.py │ llm_port_factory.py │ │
+│ │ context_strategy.py │ session_repository.py (ABC) │ │
+│ │ llm_stats_decorator │ model_billing_factory.py │ │
+│ │ model_billing.py │ port/inbound/ │ │
+│ │ usage_stats.py │ (пока пусто) │ │
+│ │ domain/service/ │ │ │
+│ │ create_session.py │ │ │
+│ │ send_message.py │ │ │
+│ │ get_session.py │ │ │
+│ │ delete_session.py │ │ │
+│ │ list_sessions.py │ │ │
+│ └──────────────────────────────────────────────────────────────┘ │
+│ │
+│ ┌──────────────┐ │
+│ │ client.py │ ← Textual TUI, импортирует ws_protocol │
+│ └──────────────┘ │
+└─────────────────────────────────────────────────────────────────────┘
+
+---
+
+Анализ: что является бизнес-логикой агента, а что — серверной обвязкой?
+
+Ядро LLM-агента (чистый домен)
+
+Это то, что не зависит ни от FastAPI, ни от Textual, ни от конкретного способа хранения:
+
+┌────────────────────────────────────────┬───────────────────────────────────────────────────────────┐
+│ Модуль │ Роль │
+├────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+│ domain/model/session.py │ Сущность — сессия разговора с LLM │
+├────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+│ domain/model/completion.py │ Value objects — CompletionConfig, TokensUsage, StopReason │
+├────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+│ domain/model/context_strategy.py │ Стратегии управления контекстом (Sliding Window, Summary) │
+├────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+│ domain/model/llm_stats_decorator.py │ Декоратор — сбор статистики по LLM-вызовам │
+├────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+│ domain/model/model_billing.py │ Value objects — ценообразование моделей │
+├────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+│ domain/model/usage_stats.py │ Value objects — аккумулятор статистики │
+├────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+│ port/outbound/llm_port.py │ Порт — контракт для LLM-провайдера + события │
+├────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+│ port/outbound/llm_port_factory.py │ Порт — фабрика LLM-портов │
+├────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+│ port/outbound/session_repository.py │ Порт — хранилище сессий │
+├────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+│ port/outbound/model_billing_factory.py │ Порт — фабрика биллинга │
+├────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+│ domain/service/\*.py │ Use cases — CreateSession, SendMessage, etc. │
+└────────────────────────────────────────┴───────────────────────────────────────────────────────────┘
+
+Серверная обвязка (зависит от FastAPI/инфраструктуры)
+
+┌────────────────────────────────┬───────────────────────────────────────────────────┐
+│ Модуль │ Роль │
+├────────────────────────────────┼───────────────────────────────────────────────────┤
+│ server.py │ Точка входа — uvicorn │
+├────────────────────────────────┼───────────────────────────────────────────────────┤
+│ common/app_factory.py │ Composition root — wiring зависимостей │
+├────────────────────────────────┼───────────────────────────────────────────────────┤
+│ common/config_loader.py │ Загрузка конфига сервера (ServerConfig, file I/O) │
+├────────────────────────────────┼───────────────────────────────────────────────────┤
+│ common/json_helpers.py │ Утилита для динамических Pydantic-моделей │
+├────────────────────────────────┼───────────────────────────────────────────────────┤
+│ adapter/inbound/web/_ │ FastAPI routes, WebSocket handler │
+├────────────────────────────────┼───────────────────────────────────────────────────┤
+│ adapter/outbound/llm/_ │ Конкретная реализация LLM через any-llm │
+├────────────────────────────────┼───────────────────────────────────────────────────┤
+│ adapter/outbound/persistence/\* │ Файловое хранилище │
+└────────────────────────────────┴───────────────────────────────────────────────────┘
+
+Пограничные случаи
+
+1. config_loader.py — содержит ServerConfig (серверное) и resolve_completion_config /
+   serialize_completion_config (относится к domain model CompletionConfig). Нужно разделить.
+2. json_helpers.py — create_model_from_schema используется в config_loader для output_config. Чисто
+   утилитарный код, но привязан к конфигурации CompletionConfig.
+3. client.py — TUI-клиент импортирует ws_protocol.py из adapter/inbound/web/. Это протокол
+   WebSocket-фреймов, который является частью серверного контракта, но используется и клиентом.
+4. adapter/outbound/llm/llm_adapter.py — реализация LLM-порта через any-llm. Это адаптер, но к какому
+   проекту он ближе? Сейчас это единственная реализация ILlmPort.
+
+---
+
+Предлагаемая структура: два проекта
+
+┌──────────────────────────────────────────────────────┐
+│ llm-agent-core (библиотека) │
+│ ───────────────────────── │
+│ Pip-пакет: llm_agent_core │
+│ │
+│ ┌────────────────────────────────────────────────┐ │
+│ │ domain/ │ │
+│ │ model/ │ │
+│ │ session.py │ │
+│ │ completion.py │ │
+│ │ context_strategy.py │ │
+│ │ llm_stats_decorator.py │ │
+│ │ model_billing.py │ │
+│ │ usage_stats.py │ │
+│ │ service/ │ │
+│ │ create_session.py │ │
+│ │ send_message.py │ │
+│ │ get_session.py │ │
+│ │ delete_session.py │ │
+│ │ list_sessions.py │ │
+│ │ port/ │ │
+│ │ inbound/ (input port protocols) │ │
+│ │ outbound/ │ │
+│ │ llm_port.py │ │
+│ │ llm_port_factory.py │ │
+│ │ session_repository.py │ │
+│ │ model_billing_factory.py │ │
+│ └────────────────────────────────────────────────┘ │
+│ │
+│ Зависимости: pydantic, (no FastAPI, no any-llm) │
+│ Тесты: domain/model/_, domain/service/_ │
+└──────────────────────────────────────────────────────┘
+
+          ▲ pip install / dependency
+          │
+
+┌───────┴──────────────────────────────────────────────┐
+│ llm-agent-server (приложение) │
+│ ────────────────────────── │
+│ │
+│ ┌────────────────────────────────────────────────┐ │
+│ │ adapter/ │ │
+│ │ inbound/web/ │ │
+│ │ session_routes.py │ │
+│ │ ws_handler.py │ │
+│ │ ws_protocol.py │ │
+│ │ http_schemas.py │ │
+│ │ error_handling.py │ │
+│ │ outbound/llm/ │ │
+│ │ llm_adapter.py │ │
+│ │ llm_port_factory_adapter.py │ │
+│ │ model_billing_factory_adapter.py │ │
+│ │ outbound/persistence/ │ │
+│ │ session_file_adapter.py │ │
+│ │ infrastructure/ │ │
+│ │ app_factory.py (composition root) │ │
+│ │ config_loader.py (ServerConfig only) │ │
+│ │ json_helpers.py │ │
+│ │ server.py │ │
+│ │ client.py │ │
+│ └────────────────────────────────────────────────┘ │
+│ │
+│ Зависимости: llm-agent-core, fastapi, uvicorn, │
+│ any-llm-sdk, textual, websockets, httpx │
+└──────────────────────────────────────────────────────┘
+
+---
+
+Ключевые решения и открытые вопросы
+
+1. Куда отнести llm_adapter.py (адаптер any-llm)?
+
+Вариант A — Оставить в серверном проекте (текущее предложение).
+
+- (+) core остаётся чистым, без зависимости от any-llm SDK
+- (+) Другие потребители core могут использовать свои LLM-адаптеры
+- (−) Каждый потребитель вынужден реализовывать адаптер с нуля
+
+Вариант B — Вынести в отдельный пакет llm-agent-adapters или включить в core как optional extra
+(llm-agent-core[any-llm]).
+
+- (+) Готовый адаптер из коробки
+- (+) core всё ещё не зависит обязательно от any-llm
+- (−) Ещё один пакет для управления
+
+Вариант C — Включить в core, сделать any-llm обязательной зависимостью.
+
+- (+) Прост в использовании
+- (−) Нарушает гексагональный принцип: core зависит от конкретного SDK
+
+Моя рекомендация: Вариант A для начала. Адаптер — это инфраструктурный код. Если появится второй
+потребитель, тогда можно выделить adapters-пакет.
+
+2. Куда отнести config_loader.py?
+
+Сейчас он содержит смешанную логику:
+
+- ServerConfig — чисто серверное (host, port, log_level, session_storage_path)
+- resolve_completion_config / serialize_completion_config — работа с CompletionConfig, который является
+  доменной моделью core
+
+Предложение: разделить файл:
+
+- ServerConfig + get_server_config() → остаётся в server (infrastructure/config_loader.py)
+- resolve_completion_config / serialize_completion_config → тоже в server, так как это file I/O логика
+  для загрузки конфигов, а core не должен знать о файловой системе
+
+3. Что с json_helpers.py?
+
+create_model_from_schema используется только в config_loader.py для построения динамической Pydantic
+модели из JSON Schema файла. Это инфраструктурная утилита → остаётся в server.
+
+4. Что с client.py?
+
+Клиент импортирует app.adapter.inbound.web.ws_protocol — модуль WebSocket-фреймов. Это контракт обмена
+сообщениями между клиентом и сервером.
+
+Варианты:
+
+- Выделить ws_protocol.py в shared-пакет (если клиент и сервер — разные проекты)
+- Оставить в server и клиент зависит от server (нежелательно)
+- Дублировать (нежелательно)
+
+Рекомендация: ws_protocol — это ни бизнес-логика агента, ни серверная логика. Это контракт API. На
+данном этапе проще оставить его в серверном проекте, а клиент сделать частью того же проекта. Если
+клиент когда-то станет отдельным приложением, тогда выделить контракт.
+
+5. Нарушение гексагональности: context_strategy.py зависит от ILlmPort
+
+Это уже отмечено в ваших openspec changes. MessageContextStrategy (domain/model) зависит от ILlmPort
+(port/outbound) — внутренний слой зависит от внешнего:
+
+domain/model/context_strategy.py → port/outbound/llm_port.py
+▲ внутренний слой ▲ внешний слой
+
+При выделении core это нужно исправить — иначе циклическая связь domain ↔ port сохранится и в пакете.
+
+6. Package structure для core
+
+llm_agent_core/
+├── **init**.py
+├── domain/
+│ ├── **init**.py
+│ ├── model/
+│ │ ├── **init**.py
+│ │ ├── session.py
+│ │ ├── completion.py
+│ │ ├── context_strategy.py
+│ │ ├── llm_stats_decorator.py
+│ │ ├── model_billing.py
+│ │ └── usage_stats.py
+│ └── service/
+│ ├── **init**.py
+│ ├── create_session.py
+│ ├── send_message.py
+│ ├── get_session.py
+│ ├── delete_session.py
+│ └── list_sessions.py
+└── port/
+├── **init**.py
+├── inbound/
+│ └── **init**.py
+└── outbound/
+├── **init**.py
+├── llm_port.py
+├── llm_port_factory.py
+├── session_repository.py
+└── model_billing_factory.py
+
+Серверный проект меняет все импорты с app.application._ на llm_agent_core._.
+
+---
+
+Порядок реализации
+
+1. Подготовка core
+   ├── Исправить циклическую зависимость context_strategy → llm_port
+   ├── Создать pyproject.toml для llm_agent_core
+   ├── Перенести domain/ и port/ в новый пакет
+   └── Адаптировать внутренние импорты
+
+2. Адаптация серверного проекта
+   ├── Заменить app.application._ → llm_agent_core._
+   ├── Переместить common/ → infrastructure/
+   ├── Обновить composition root
+   └── Обновить pyproject.toml — добавить зависимость от core
+
+3. Тесты
+   ├── Доменные тесты → core
+   ├── Use case тесты → core (или server, если нужны моки адаптеров)
+   └── Интеграционные → server
+
+4. CI/CD
+   └── Настроить сборку и публикацию core отдельно
+
+---
+
+Вопросы к тебе
+
+1. Монорепо или два репозитория? Монорепо с workspace (например, через hatch или uv workspace) проще для
+   разработки. Два репозитория — чище для независимого релиза. Что предпочтительнее?
+2. Адаптер any-llm — согласен с Вариантом A (оставить в server), или предпочитаешь optional extra в
+   core?
+3. Клиент — оставляем в серверном проекте или рассматриваем третий пакет?
+4. Именование пакета — llm_agent_core подходит, или есть предпочтения по названию?

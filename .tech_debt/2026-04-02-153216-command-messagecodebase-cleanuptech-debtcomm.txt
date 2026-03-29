@@ -1,0 +1,327 @@
+ ▐▛███▜▌   Claude Code v2.1.89
+▝▜█████▛▘  Sonnet 4.6 · Claude Pro
+  ▘▘ ▝▝    /workspace
+
+● ★ Insight ─────────────────────────────────────
+  The codebase follows Hexagonal Architecture (ports & adapters), which is
+  excellent for testability — but its value is undermined here because there are
+   zero tests. The domain layer's isolation was designed precisely to make unit
+  testing easy without infrastructure dependencies.
+  ─────────────────────────────────────────────────
+
+  ---
+  Technical Debt Analysis — /workspace
+
+  Project: FastAPI/WebSocket Chat Server + Textual TUI Client
+  Total LOC: ~1,546 Python | Architecture: Clean/Hexagonal
+
+  ---
+  Debt Inventory
+
+  CRITICAL
+
+  1. Zero Test Coverage
+
+  Files: All | Impact: Any refactoring is dangerous
+
+  The codebase has no tests at all — no unit, integration, or WebSocket tests.
+  The CI pipeline at .github/workflows/ci.yml:27 only compiles modules (python 
+  -c "import ...") rather than running tests. Given the hexagonal architecture,
+  domain entities like Session and MessageContextStrategy are perfectly isolated
+   and ready for unit testing.
+
+  Estimated annual cost: High — every change risks undetected regression.
+
+  ---
+  2. Race Conditions in Session Registry
+
+  Files: app/infrastructure/app_factory.py:55,
+  app/adapters/controllers/session_routes.py:112,
+  app/adapters/controllers/ws_handler.py:136
+
+  The shared sessions dict has no synchronization:
+  # app_factory.py:55
+  app.state.sessions = {}  # No asyncio.Lock
+
+  # session_routes.py:112 — not atomic
+  sc = sessions.pop(session_id, None)
+  if sc is not None and sc.ws is not None:  # ws state can change between check 
+  and use
+      await sc.ws.close(...)
+
+  # ws_handler.py:136 — overwrites task without cancelling previous
+  sc.stream_task = asyncio.create_task(...)
+
+  Fix: Wrap sessions in a SessionRegistry class with an asyncio.Lock.
+
+  ---
+  HIGH
+
+  3. Broad Exception Swallowing (8 instances)
+
+  Files: app/adapters/controllers/ws_handler.py:92,100, session_routes.py:116,
+  client.py:207,225,242,271,314
+
+  # ws_handler.py:92 — should be except WebSocketDisconnect
+  except Exception:
+      pass
+
+  except Exception: pass silently hides WebSocket disconnections, HTTP errors,
+  and streaming failures. The specific exceptions
+  (websockets.exceptions.ConnectionClosedError,
+  starlette.websockets.WebSocketDisconnect) should be caught.
+
+  ---
+  4. Unhandled Concurrency Hazards in WebSocket Loop
+
+  File: app/adapters/controllers/ws_handler.py:117
+
+  async def _ws_loop(sc, ws, ...):
+      while True:
+          raw = await ws.receive_text()  # No timeout — zombie connections 
+  possible
+
+  Also at line 136: asyncio.create_task() exceptions can be silently lost if the
+   task is not properly awaited.
+
+  ---
+  5. Context Strategy Lacks LLM Failure Recovery
+
+  File: app/domain/entities/context_strategy.py:136
+
+  SummaryStrategy._apply_strategy() calls the LLM to summarize context but has
+  no timeout, no retry, and no fallback if the LLM API fails mid-summarization.
+  Session context could become corrupted.
+
+  ---
+  MEDIUM
+
+  6. Circular Dependencies via Late Imports (3 instances)
+
+  Files: session_file_adapter.py:54,107, pricing.py:39
+
+  # session_file_adapter.py:54 — inside method to avoid circular import
+  from app.infrastructure.config_loader import resolve_completion_config
+
+  Late imports inside methods indicate architectural boundary violations between
+   the adapters and infrastructure layers. Root cause: config_loader and
+  session_file_adapter have bidirectional coupling.
+
+  ---
+  7. Code Duplication (4 patterns)
+
+  File: client.py:203-271, session_routes.py:39-52
+
+  Pattern A — httpx.AsyncClient instantiated 4× with identical error handling:
+  # Repeated verbatim in _refresh_sessions, _create_session, _delete_session, 
+  _select_session
+  try:
+      async with httpx.AsyncClient() as http:
+          resp = await http.METHOD(...)
+          resp.raise_for_status()
+  except Exception as e:
+      self._notify_system(f"Could not ...: {e}")
+
+  Pattern B — 5 boilerplate dependency-getter functions in
+  session_routes.py:39-52:
+  def _get_create_uc(request: Request) -> CreateSessionUseCase:
+      return request.app.state.create_session_uc
+  # ... repeated for delete, get, list, send
+
+  ---
+  8. Complex Methods Exceeding Single Responsibility
+
+  Method: _stream_response()
+  File: ws_handler.py:42
+  Lines: 61
+  Issue: Mixes frame dispatch, error handling, logging
+  ────────────────────────────────────────
+  Method: get_session()
+  File: session_file_adapter.py:52
+  Lines: 53
+  Issue: I/O + validation + config resolution
+  ────────────────────────────────────────
+  Method: _write_session_files()
+  File: session_file_adapter.py:106
+  Lines: 37
+  Issue: DTO → dict → I/O all inline
+  ────────────────────────────────────────
+  Method: _ws_loop()
+  File: ws_handler.py:104
+  Lines: 35
+  Issue: Frame parsing + task management
+
+  ---
+  9. Missing Abstractions
+
+  - No SessionRegistry class: Raw dict used directly, making locking and cleanup
+   harder
+  - No HTTP client wrapper: httpx used directly 4× in client.py with no
+  retry/backoff
+  - config_loader.py (118 lines) mixes file I/O, JSON parsing, resource loading,
+   and serialization — should be split
+
+  ---
+  LOW
+
+  10. Infrastructure Gaps
+
+  Files: Dockerfile, docker-compose.yml, .github/workflows/ci.yml
+
+  ┌────────────────────────────┬──────────────────────────┬─────────────────┐
+  │           Issue            │         Location         │      Risk       │
+  ├────────────────────────────┼──────────────────────────┼─────────────────┤
+  │ No non-root user           │ Dockerfile               │ Security        │
+  ├────────────────────────────┼──────────────────────────┼─────────────────┤
+  │ No health check            │ Dockerfile,              │ Ops             │
+  │                            │ docker-compose.yml       │                 │
+  ├────────────────────────────┼──────────────────────────┼─────────────────┤
+  │ No signal handlers for     │ server.py                │ Data loss       │
+  │ graceful shutdown          │                          │                 │
+  ├────────────────────────────┼──────────────────────────┼─────────────────┤
+  │ No .env.example            │ root                     │ Onboarding      │
+  ├────────────────────────────┼──────────────────────────┼─────────────────┤
+  │ CI only imports, doesn't   │ ci.yml:27                │ Quality gate    │
+  │ test                       │                          │ missing         │
+  └────────────────────────────┴──────────────────────────┴─────────────────┘
+
+  ---
+  11. Missing Documentation
+
+  56+ classes/methods lack docstrings across 21 files. Public interfaces like
+  ILlmPort, MessageContextStrategy, SessionDto, and all use cases have no
+  documentation.
+
+  ---
+  Metrics Dashboard
+
+  test_coverage:
+    unit: 0%
+    integration: 0%
+    e2e: 0%
+    target: 80% / 60% / 30%
+
+  code_quality:
+    broad_exception_handlers: 8
+    late_imports_circular_dep: 3
+    methods_over_30_lines: 7
+    undocumented_public_classes: 56+
+    duplicate_patterns: 4
+
+  concurrency_issues:
+    unprotected_shared_state: 3
+    zombie_connection_risk: 1
+    lost_task_exception_risk: 1
+
+  infrastructure:
+    ci_pipeline_quality: "import-check only"
+    docker_security: "root user"
+    missing_files: [".env.example", "tests/"]
+
+  ---
+  Prioritized Remediation Roadmap
+
+  Sprint 1 — Critical Safety (Week 1-2)
+
+  1. Add asyncio.Lock to session registry
+     Effort: 4h | Risk reduction: HIGH
+     Files: app_factory.py, session_routes.py, ws_handler.py
+
+  2. Replace `except Exception: pass` with specific exceptions
+     Effort: 3h | Risk reduction: HIGH
+     Files: ws_handler.py, session_routes.py, client.py
+
+  3. Add WebSocket receive timeout
+     Effort: 2h | Risk reduction: HIGH
+     File: ws_handler.py:117
+
+  Sprint 2 — Foundation Tests (Week 3-4)
+
+  4. Unit tests for domain entities
+     Effort: 16h | Coverage gain: ~40%
+     Targets: Session, MessageContextStrategy variants, CompletionConfig
+
+  5. Integration tests for use cases
+     Effort: 12h | Coverage gain: ~20%
+     Targets: CreateSession, SendMessage, DeleteSession
+
+  6. CI pipeline: run pytest with coverage gate
+     Effort: 2h
+     File: .github/workflows/ci.yml
+
+  Month 2 — Structure
+
+  7. Extract SessionRegistry class with asyncio.Lock
+     Effort: 8h | Fixes debt items: #2, #7, #9
+
+  8. Extract HTTP client wrapper in client.py
+     Effort: 6h | Fixes duplication across 4 methods
+
+  9. Resolve circular dependency in session_file_adapter ↔ config_loader
+     Effort: 8h | Likely solution: inject config at construction time
+
+  Month 3 — Quality
+
+  10. Refactor large methods (_stream_response, get_session)
+      Effort: 12h
+
+  11. Add LLM failure recovery in SummaryStrategy
+      Effort: 6h
+
+  12. Docker security hardening (non-root, healthcheck)
+      Effort: 4h
+
+  ---
+  Prevention Strategy
+
+  ci_gates_to_add:
+    - pytest --cov=app --cov-fail-under=70
+    - ruff check .
+    - mypy app/
+
+  pre_commit:
+    - no broad `except Exception:` (custom flake8 rule or ruff)
+    - new public classes require docstrings
+
+  code_review_checklist:
+    - asyncio shared state requires Lock documentation
+    - new HTTP calls must use shared client wrapper
+    - exception handling must name specific exception types
+
+  ---
+  ★ Insight ─────────────────────────────────────
+  The three late imports (from x import y inside a function body) in
+  session_file_adapter.py and pricing.py are a classic "smell" that exposes a
+  hidden circular dependency. In hexagonal architecture, the fix is usually
+  dependency inversion: pass the dependency at construction time (as a
+  constructor parameter) rather than importing it at call time. This makes the
+  coupling explicit and eliminates the circular import entirely.
+  ─────────────────────────────────────────────────
+
+  ---
+  ROI Summary
+
+  ┌─────────────────────┬────────┬─────────────────────────────┬────────────┐
+  │     Initiative      │ Effort │       Monthly Saving        │ Break-even │
+  ├─────────────────────┼────────┼─────────────────────────────┼────────────┤
+  │ Fix race conditions │ 9h     │ Prevents session corruption │ Immediate  │
+  │                     │        │  bugs                       │            │
+  ├─────────────────────┼────────┼─────────────────────────────┼────────────┤
+  │ Add test suite      │ 30h    │ ~40% reduction in           │ Month 1    │
+  │                     │        │ regression bugs             │            │
+  ├─────────────────────┼────────┼─────────────────────────────┼────────────┤
+  │ Fix broad           │ 3h     │ Faster debugging cycles     │ Immediate  │
+  │ exceptions          │        │                             │            │
+  ├─────────────────────┼────────┼─────────────────────────────┼────────────┤
+  │ Extract HTTP client │ 6h     │ 4× less duplication to      │ Month 1    │
+  │                     │        │ maintain                    │            │
+  ├─────────────────────┼────────┼─────────────────────────────┼────────────┤
+  │ Session registry    │ 8h     │ Enables safe concurrency +  │ Month 2    │
+  │ class               │        │ tests                       │            │
+  └─────────────────────┴────────┴─────────────────────────────┴────────────┘
+
+  The highest leverage action is the test suite — the hexagonal architecture was
+   built specifically to make testing easy. Getting tests in place protects all
+  future refactoring work.
+
+✻ Cooked for 3m 44s

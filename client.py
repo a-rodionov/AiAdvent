@@ -1,25 +1,25 @@
-import asyncio
 import argparse
 import uuid
-from typing import Optional, Any
+from typing import Any
 
 import httpx
 import websockets
 import websockets.exceptions
 from pydantic import TypeAdapter, ValidationError
-from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, ScrollableContainer
-from textual.widgets import Header, Footer, Static, Input, Button, Label, ListView, ListItem
-from textual.reactive import reactive
-from textual.message import Message
 from textual import work
+from textual.app import App, ComposeResult
+from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.message import Message
+from textual.reactive import reactive
+from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Static
 
-from ws_protocol import (
-    ServerFrame,
-    ChunkFrame, DoneFrame, ErrorFrame,
+from server.adapter.inbound.web.ws_protocol import (
+    ChunkFrame,
+    DoneFrame,
+    ErrorFrame,
     SendMessageFrame,
+    ServerFrame,
 )
-
 
 # ── Custom Textual Messages ───────────────────────────────────────────────────
 
@@ -164,12 +164,12 @@ class ChatApp(App):
     }
     """
 
-    active_session_id: reactive[Optional[str]] = reactive(None)
+    active_session_id: reactive[str | None] = reactive(None)
 
     def __init__(self, server_url: str) -> None:
         super().__init__()
         self.server_url = server_url.rstrip("/")
-        self._ws: Optional[Any] = None
+        self._ws: Any | None = None
         self._server_frame_adapter: TypeAdapter = TypeAdapter(ServerFrame)
         self._streaming: bool = False
         self._current_assistant_text: str = ""
@@ -398,11 +398,11 @@ class ChatApp(App):
         elif event.button.id == "btn-send":
             await self._send_message()
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def on_input_submitted(self, event: "Input.Submitted") -> None:
         if event.input.id == "message-input":
             await self._send_message()
 
-    async def on_list_view_selected(self, event: ListView.Selected) -> None:
+    async def on_list_view_selected(self, event: "ListView.Selected") -> None:
         if not isinstance(event.item, SessionItem):
             return
         if event.item.session_id != self.active_session_id:

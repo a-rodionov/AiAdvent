@@ -4,6 +4,7 @@ ARG TZ
 ENV TZ="$TZ"
 
 ARG CLAUDE_CODE_VERSION=latest
+ARG OPENSPEC_VERSION=latest
 
 # Install basic development tools and iptables/ipset
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -82,6 +83,18 @@ RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/
 # Install Claude
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
+# Install OpenSpec
+ENV OPENSPEC_TELEMETRY=0
+RUN npm install -g @fission-ai/openspec@${OPENSPEC_VERSION}
+
+# Install lean-ctx
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/home/node/.cargo/bin:${PATH}"
+RUN cargo install lean-ctx
+RUN lean-ctx setup
+
+# Install pyright
+RUN npm install -g pyright
 
 # Copy and set up firewall script
 COPY init-firewall.sh /usr/local/bin/

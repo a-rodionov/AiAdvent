@@ -1,5 +1,0 @@
-{
-  "log_level": "info",
-  "default_completion_config_path": "completion_configs/haiku_4_5_limited.json",
-  "models_pricing_path": "models_service_data/models_pricing.json"
-}

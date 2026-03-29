@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./__pycache__)",
+      "Read(./.mypy_cache)",
+      "Read(./.pytest_cache)",
+      "Read(./.ruff_cache)",
+      "Read(./.tech_debt)",
+      "Read(./.coverage)"
+    ]
+  },
+  "enabledPlugins": {
+    "pyright-lsp@claude-plugins-official": true,
+    "context7@claude-plugins-official": false,
+    "feature-dev@claude-plugins-official": false
+  }
+}

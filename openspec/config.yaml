@@ -1,0 +1,17 @@
+schema: spec-driven
+
+rules:
+  specs:
+    - Be explicit about mechanisms, not just outcomes (say HOW, not just WHAT)
+    - If we generate artifacts, specify deletion/modification by explicit list lookup, not pattern matching
+  design:
+    - Use DDD tactical patterns for applicatoin design.
+    - Applications have 4 layers infrastructure, adapters, use_cases, domain.
+    - domain layer. No I/O, no framework imports, no infrastructure types. Pure Python dataclasses/ABCs.
+    - use_cases layer. Orchestrates domain objects. Imports only from `domain/`. No HTTP, no file system.
+    - adapters layer. Concrete implementations of domain ports. Imports domain + use_cases. Never imported by domain or use_cases.
+    - infrastructure layer. Framework wiring, config loading, DI container, app factory. Imports everything; wires it together.
+  tasks:
+    - Each change to domain and use_cases layers must be covered with unit tests. Tests for adapters and infrastructure layers may be omitted.
+    - If change requires test, use TDD methodology for change implementation.
+    - Use scenarios from specs for additional tests.

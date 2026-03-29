@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  lint-and-compile:
+    name: Compile & architecture check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile all server/ modules
+        run: |
+          find server/ -name "*.py" -print0 \
+            | xargs -0 python -m py_compile
+          echo "All modules compiled successfully."
+
+      - name: Check layer dependency direction
+        run: |
+          python - <<'EOF'
+          """
+          Enforce Clean Architecture import rules for the server/ package.
+
+          Forbidden cross-layer imports:
+            - server.application.domain.*         must NOT import from server.application.adapters.*
+            - server.application.port.*      must NOT import from server.application.adapters.*
+
+          The check is done via simple text scanning of each .py file's import
+          statements rather than AST traversal so it works without executing the
+          modules and handles conditional imports correctly.
+          """
+          import sys
+          import re
+          from pathlib import Path
+
+          FORBIDDEN: dict[str, list[str]] = {
+              "server.application/domain": ["server.application.adapters"],
+              "server.application/port": ["server.application.adapters"],
+          }
+
+          # Matches:  import X  /  from X import Y  /  from X import (...)
+          IMPORT_RE = re.compile(
+              r"^\s*(?:import|from)\s+([\w.]+)",
+              re.MULTILINE,
+          )
+
+          violations: list[str] = []
+
+          for source_prefix, forbidden_targets in FORBIDDEN.items():
+              for py_file in Path(source_prefix).rglob("*.py"):
+                  source = py_file.read_text(encoding="utf-8")
+                  for match in IMPORT_RE.finditer(source):
+                      imported = match.group(1)
+                      for target in forbidden_targets:
+                          if imported == target or imported.startswith(target + "."):
+                              violations.append(
+                                  f"{py_file}: '{imported}' is forbidden "
+                                  f"(layer rule: {source_prefix} must not import {target})"
+                              )
+
+          if violations:
+              print("Architecture violations found:")
+              for v in violations:
+                  print(f"  {v}")
+              sys.exit(1)
+
+          print("Architecture dependency check passed.")
+          EOF

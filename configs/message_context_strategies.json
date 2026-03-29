@@ -1,0 +1,35 @@
+{
+  "message_context_strategies": [
+    {
+      "type": "dummy",
+      "completion_config": {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 10000,
+        "temperature": 0.0
+      }
+    },
+    {
+      "type": "summary",
+      "prompt_path": "completion_resources/summarization_prompt.md",
+      "window_size": 4,
+      "completion_config": {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 10000,
+        "temperature": 0.0,
+        "system_prompt_path": "completion_resources/summarization_system_prompt.md"
+      }
+    },
+    {
+      "type": "sliding_window",
+      "window_size": 4,
+      "completion_config": {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 10000,
+        "temperature": 0.0
+      }
+    }
+  ]
+}

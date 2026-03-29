@@ -1,5 +1,0 @@
-{
-  "log_level": "info",
-  "default_completion_config_path": "completion_configs/sonnet_4_6_std.json",
-  "models_pricing_path": "models_service_data/models_pricing.json"
-}

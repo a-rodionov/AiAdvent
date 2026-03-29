@@ -1,0 +1,22 @@
+{
+  "log_level": "info",
+  "host": "127.0.0.1",
+  "port": 8000,
+  "models_billing_path": "configs/models_billing.json",
+  "session_storage_path": "session_storage",
+  "default_completion_config": {
+    "provider": "anthropic",
+    "model": "claude-haiku-4-5-20251001",
+    "max_tokens": 10000,
+    "temperature": 0.2
+  },
+  "message_context_strategy_config": {
+    "type": "dummy",
+    "completion_config": {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5-20251001",
+      "max_tokens": 10000,
+      "temperature": 0.2
+    }
+  }
+}
