@@ -12,7 +12,7 @@
     {
       "type": "summary",
       "prompt_path": "completion_resources/summarization_prompt.md",
-      "window_size": 4,
+      "window_size": 8,
       "completion_config": {
         "provider": "anthropic",
         "model": "claude-haiku-4-5-20251001",
@@ -23,7 +23,7 @@
     },
     {
       "type": "sliding_window",
-      "window_size": 4,
+      "window_size": 8,
       "completion_config": {
         "provider": "anthropic",
         "model": "claude-haiku-4-5-20251001",
